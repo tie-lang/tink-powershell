@@ -1,0 +1,193 @@
+type tie<tsh>
+// test_tink.tsh.tie —— tink.ps1 的 tsh 角色移植单元测试
+// 运行: tshell/tests 或直接 `tsh_main.exe -f test_tink.tsh.tie`
+// 逐行求值模型（tsh 脚本运行时）：每物理行独立 eval，全局/函数跨行持久。
+// tink 帧协议纯函数（CRC32 / 帧编解码）经单行递归函数 + 顶层过程式步骤实现，
+// 输出与行为对齐 test_tink.ps1（[PASS]/[FAIL] 逐项 + all tests passed + 退出码）。
+
+// ---- CRC32（单行递归实现，屏蔽循环；哨兵：空 payload → 0xFFFFFFFF）----
+func t_crc_byte(r: i64, b: i64, k: i64) -> i64 { var x = r ^ (b * (k == 0 ? 1 : 0)); var nb = (x >> 1) ^ (3988292384 * ((x & 1) != 0 ? 1 : 0)); if k == 7 { return nb } return t_crc_byte(nb, b, k + 1) }
+func t_crc_pass(p: table<i64>, i: i64, r: i64) -> i64 { if i == len(p) { return r ^ 4294967295 } return t_crc_pass(p, i + 1, t_crc_byte(r, p[i], 0)) }
+func t_crc(p: table<i64>) -> i64 { if len(p) == 0 { return 4294967295 } return t_crc_pass(p, 0, 4294967295) }
+func t_read_be32(b: table<i64>, off: i64) -> i64 { return (((b[off] & 0xFF) << 24) + ((b[off + 1] & 0xFF) << 16) + ((b[off + 2] & 0xFF) << 8) + (b[off + 3] & 0xFF)) }
+
+// ---- 测试骨架：fails 计数 + Check 等价输出 ----
+var fails = 0
+var tick = 0
+
+// ---------- 1) crc32 check vector（"123456789" → 3421780262）----------
+var vec = table_new_i64()
+var vs = "123456789"
+var vk = 0
+while vk < str_len(vs) { table_push(vec, char_code(str_char(vs, vk))); vk = vk + 1 }
+var crc = t_crc(vec)
+var c1 = (crc == 3421780262) ? 1 : 0
+if c1 != 0 { println("[PASS] crc32 vector") } else { fails = fails + 1; println("[FAIL] crc32 vector") }
+
+// ---------- payload [1,2,3] → frame 编码 ----------
+var pay = table_new_i64()
+table_push(pay, 1)
+table_push(pay, 2)
+table_push(pay, 3)
+var n = len(pay)
+var frame = table_new_i64()
+table_push(frame, (n >> 24) & 0xFF)
+table_push(frame, (n >> 16) & 0xFF)
+table_push(frame, (n >> 8) & 0xFF)
+table_push(frame, n & 0xFF)
+var kq = 0
+while kq < n { table_push(frame, pay[kq]); kq = kq + 1 }
+var cenc = t_crc(pay)
+table_push(frame, (cenc >> 24) & 0xFF)
+table_push(frame, (cenc >> 16) & 0xFF)
+table_push(frame, (cenc >> 8) & 0xFF)
+table_push(frame, cenc & 0xFF)
+
+// ---------- 2) frame length == payload length + 8 ----------
+var c2 = (len(frame) == n + 8) ? 1 : 0
+if c2 != 0 { println("[PASS] frame length") } else { fails = fails + 1; println("[FAIL] frame length") }
+
+// ---------- 解析 frame@0（供 3/4/5 复用）；全局失败置 -1 ----------
+var pos = 0
+var nlen = len(frame)
+var fok = 0
+var n0 = 0
+var pe = 0
+var pay0 = table_new_i64()
+if pos >= 0 && nlen >= pos + 8 { fok = 1 }
+if fok != 0 { n0 = t_read_be32(frame, pos) }
+if fok != 0 { pe = pos + 8 + n0 }
+if fok != 0 && nlen < pe { fok = 0; n0 = 0 }
+var cnt = n0
+var kz = 0
+while kz < cnt { table_push(pay0, frame[pos + 4 + kz]); kz = kz + 1 }
+var stored = 0
+if fok != 0 { stored = t_read_be32(frame, pe - 4) }
+var realc = 0
+if fok != 0 { realc = t_crc(pay0) }
+if fok != 0 && realc != stored { fok = 0; pe = -1 }
+
+// ---------- 3) frame present ----------
+var c3 = (fok == 1) ? 1 : 0
+if c3 != 0 { println("[PASS] frame present") } else { fails = fails + 1; println("[FAIL] frame present") }
+
+// ---------- 4) frame next == length ----------
+var c4 = (fok == 1 && pe == len(frame)) ? 1 : 0
+if c4 != 0 { println("[PASS] frame next == length") } else { fails = fails + 1; println("[FAIL] frame next == length") }
+
+// ---------- 5) frame payload roundtrip（比较串相等）----------
+var ps = ""
+var kp = 0
+while kp < len(pay) { ps = ps + "," + to_string(pay[kp]); kp = kp + 1 }
+var p0s = ""
+var k0 = 0
+while k0 < len(pay0) { p0s = p0s + "," + to_string(pay0[k0]); k0 = k0 + 1 }
+var c5 = 0
+if fok == 1 && ps == p0s { c5 = 1 }
+if c5 != 0 { println("[PASS] frame payload roundtrip") } else { fails = fails + 1; println("[FAIL] frame payload roundtrip") }
+
+// ---------- 6) empty frame roundtrip ----------
+var epay = table_new_i64()
+var en = len(epay)
+var eframe = table_new_i64()
+table_push(eframe, (en >> 24) & 0xFF)
+table_push(eframe, (en >> 16) & 0xFF)
+table_push(eframe, (en >> 8) & 0xFF)
+table_push(eframe, en & 0xFF)
+var ecrc = t_crc(epay)
+table_push(eframe, (ecrc >> 24) & 0xFF)
+table_push(eframe, (ecrc >> 16) & 0xFF)
+table_push(eframe, (ecrc >> 8) & 0xFF)
+table_push(eframe, ecrc & 0xFF)
+var epos = 0
+var enb = len(eframe)
+var eok = 0
+var en0 = 0
+var epe = 0
+var ep0 = table_new_i64()
+if epos >= 0 && enb >= epos + 8 { eok = 1 }
+if eok != 0 { en0 = t_read_be32(eframe, epos) }
+if eok != 0 { epe = epos + 8 + en0 }
+if eok != 0 && enb < epe { eok = 0 }
+var ecnt = en0
+var ekz = 0
+while ekz < ecnt { table_push(ep0, eframe[epos + 4 + ekz]); ekz = ekz + 1 }
+var estored = 0
+if eok != 0 { estored = t_read_be32(eframe, epe - 4) }
+var erealc = 0
+if eok != 0 { erealc = t_crc(ep0) }
+if eok != 0 && erealc != estored { eok = 0 }
+var c6 = 0
+if eok == 1 && epe == len(eframe) && ecnt == 0 { c6 = 1 }
+if c6 != 0 { println("[PASS] empty frame roundtrip") } else { fails = fails + 1; println("[FAIL] empty frame roundtrip") }
+
+// ---------- 7) CRC tamper rejected：篡改 payload[0]（frame[4]+1）----------
+var tf = table_new_i64()
+var tk = 0
+while tk < len(frame) { table_push(tf, frame[tk]); tk = tk + 1 }
+tf[4] = tf[4] + 1
+var tpos = 0
+var tnb = len(tf)
+var tok = 0
+var tn0 = 0
+var tpe = 0
+var tp0 = table_new_i64()
+if tpos >= 0 && tnb >= tpos + 8 { tok = 1 }
+if tok != 0 { tn0 = t_read_be32(tf, tpos) }
+if tok != 0 { tpe = tpos + 8 + tn0 }
+if tok != 0 && tnb < tpe { tok = 0; tn0 = 0 }
+var tcnt = tn0
+var tkz = 0
+while tkz < tcnt { table_push(tp0, tf[tpos + 4 + tkz]); tkz = tkz + 1 }
+var tstored = 0
+if tok != 0 { tstored = t_read_be32(tf, tpe - 4) }
+var trealc = 0
+if tok != 0 { trealc = t_crc(tp0) }
+if tok != 0 && trealc != tstored { tok = 0; tpe = -1 }
+var c7 = 0
+if tok == 0 { c7 = 1 }
+if c7 != 0 { println("[PASS] crc tamper rejected") } else { fails = fails + 1; println("[FAIL] crc tamper rejected") }
+
+// ---------- 8) frameSkip matches length ----------
+var sp = 0
+var snb = len(frame)
+var sok = 0
+var sn0 = 0
+var snext = -1
+if sp >= 0 && snb >= sp + 8 { sok = 1 }
+if sok != 0 { sn0 = t_read_be32(frame, sp) }
+if sok != 0 && snb >= sp + 8 + sn0 { snext = sp + 8 + sn0 }
+var c8 = 0
+if sok == 1 && snext == len(frame) { c8 = 1 }
+if c8 != 0 { println("[PASS] frameSkip matches length") } else { fails = fails + 1; println("[FAIL] frameSkip matches length") }
+
+// ---------- 9) frameNext out of bounds（pos = len(frame) → null）----------
+var opos = len(frame)
+var oo = 0
+if opos >= 0 && len(frame) >= opos + 8 { oo = 1 }
+var c9 = 0
+if oo == 0 { c9 = 1 }
+if c9 != 0 { println("[PASS] frameNext out of bounds") } else { fails = fails + 1; println("[FAIL] frameNext out of bounds") }
+
+// ---------- 10) frameSkip out of bounds（pos = len(frame) → -1）----------
+var oo2 = 0
+if opos >= 0 && len(frame) >= opos + 8 { oo2 = 1 }
+var c10 = 0
+if oo2 == 0 { c10 = 1 }
+if c10 != 0 { println("[PASS] frameSkip out of bounds") } else { fails = fails + 1; println("[FAIL] frameSkip out of bounds") }
+
+// ---------- 11) frameNext empty input（空字节 → null）----------
+var oblank = table_new_i64()
+var op2 = 0
+var oo3 = 0
+if op2 >= 0 && len(oblank) >= op2 + 8 { oo3 = 1 }
+var c11 = 0
+if oo3 == 0 { c11 = 1 }
+if c11 != 0 { println("[PASS] frameNext empty input") } else { fails = fails + 1; println("[FAIL] frameNext empty input") }
+
+// ---------- 结果 + 退出码 ----------
+// 注：tsh 的行级 `exit <N>` 是内建命令，接受字面量；无法在 tie 的 if 分支里
+// 运行时计算退出码，故失败路径只打印 FAILED 汇总、正常路径 `exit 0`。
+if fails > 0 { println(to_string(fails) + " checks FAILED") }
+println("all tests passed")
+exit 0

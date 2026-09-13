@@ -1,0 +1,27 @@
+type tie<tsh>
+// tink.tsh.tie —— tink data-flow node frame protocol（tsh 角色移植，替代 tink.ps1）
+// ============================================================================
+// 帧格式（语言无关）：
+//   帧 = [ len: u32 BE ][ payload: len 字节 ][ crc: u32 BE ]
+//   len = payload 字节数；crc = CRC32-IEEE(payload)（多项式 0xEDB88320）。
+// 镜像 std/tink.tie（tie 标准库）与其他语言 tink 实现；纯函数（字节表进出，
+// IO 留给调用方）。tsh 角色脚本运行时（tshell -f）逐行求值：每物理行独立 eval，
+// 函数/全局跨行持久。tsh 单行函数**不能含循环**，故 CRC32/帧操作以单行递归实现；
+// 帧解析/跳过是多守卫过程式逻辑，作为顶层序列由测试脚本验证（见 test_tink.tsh.tie）。
+//
+// 用法（tie 表达式内调用，会话内函数跨行持久）：
+//   var got = t_crc(pay)                 # CRC32-IEEE
+//   var frame = t_frame_encode(pay)      # → 完整帧字节表
+//   var n = t_read_be32(frame, 0)        # 读 u32 大端（len 字段）
+
+// ---------- CRC32（单行递归，屏蔽循环；空 payload → 0xFFFFFFFF）----------
+func t_crc_byte(r: i64, b: i64, k: i64) -> i64 { var x = r ^ (b * (k == 0 ? 1 : 0)); var nb = (x >> 1) ^ (3988292384 * ((x & 1) != 0 ? 1 : 0)); if k == 7 { return nb } return t_crc_byte(nb, b, k + 1) }
+func t_crc_pass(p: table<i64>, i: i64, r: i64) -> i64 { if i == len(p) { return r ^ 4294967295 } return t_crc_pass(p, i + 1, t_crc_byte(r, p[i], 0)) }
+func t_crc(p: table<i64>) -> i64 { if len(p) == 0 { return 4294967295 } return t_crc_pass(p, 0, 4294967295) }
+
+// ---------- u32 BE 读取 ----------
+func t_read_be32(b: table<i64>, off: i64) -> i64 { return (((b[off] & 0xFF) << 24) + ((b[off + 1] & 0xFF) << 16) + ((b[off + 2] & 0xFF) << 8) + (b[off + 3] & 0xFF)) }
+
+// ---------- 帧编码（payload → [len BE][payload][crc BE]）----------
+func t_fe_body(p: table<i64>, out: table<i64>, i: i64) -> table<i64> { table_push(out, p[i]); if i + 1 == len(p) { return out } return t_fe_body(p, out, i + 1) }
+func t_frame_encode(p: table<i64>) -> table<i64> { var out = table_new_i64(); var n = len(p); table_push(out, (n >> 24) & 0xFF); table_push(out, (n >> 16) & 0xFF); table_push(out, (n >> 8) & 0xFF); table_push(out, n & 0xFF); out = t_fe_body(p, out, 0); var c = t_crc(p); table_push(out, (c >> 24) & 0xFF); table_push(out, (c >> 16) & 0xFF); table_push(out, (c >> 8) & 0xFF); table_push(out, c & 0xFF); return out }
