@@ -23,5 +23,5 @@ func t_crc(p: table<i64>) -> i64 { if len(p) == 0 { return 4294967295 } return t
 func t_read_be32(b: table<i64>, off: i64) -> i64 { return (((b[off] & 0xFF) << 24) + ((b[off + 1] & 0xFF) << 16) + ((b[off + 2] & 0xFF) << 8) + (b[off + 3] & 0xFF)) }
 
 // ---------- 帧编码（payload → [len BE][payload][crc BE]）----------
-func t_fe_body(p: table<i64>, out: table<i64>, i: i64) -> table<i64> { table_push(out, p[i]); if i + 1 == len(p) { return out } return t_fe_body(p, out, i + 1) }
+func t_fe_body(p: table<i64>, ref out: table<i64>, i: i64) -> table<i64> { table_push(out, p[i]); if i + 1 == len(p) { return out } return t_fe_body(p, out, i + 1) }
 func t_frame_encode(p: table<i64>) -> table<i64> { var out = table_new_i64(); var n = len(p); table_push(out, (n >> 24) & 0xFF); table_push(out, (n >> 16) & 0xFF); table_push(out, (n >> 8) & 0xFF); table_push(out, n & 0xFF); out = t_fe_body(p, out, 0); var c = t_crc(p); table_push(out, (c >> 24) & 0xFF); table_push(out, (c >> 16) & 0xFF); table_push(out, (c >> 8) & 0xFF); table_push(out, c & 0xFF); return out }
